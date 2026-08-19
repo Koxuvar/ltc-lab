@@ -1,32 +1,35 @@
-//! Streaming LTC decoder: one sample in, timecodes out. No knowledge of the
-//! whole signal, so it works on a live audio callback. This replaces the
-//! two-pass offline decoder, which needed the entire file to set its threshold.
+//! Streaming LTC decoder: one sample in, timecodes out. Works on a live audio
+//! callback (no whole-signal knowledge).
 //!
 //! Signal chain per sample:
-//!   DC blocker (one-pole high-pass) -> hysteresis zero-cross -> interval timing
-//!   -> adaptive half-bit estimate -> biphase classify -> 80-bit ring -> sync.
+//!   DC blocker -> hysteresis zero-cross -> interval timing -> bit-period
+//!   tracker -> biphase classify -> 80-bit ring -> sync -> BCD validity gate.
 
 use crate::frame::{decode_frame, Timecode, SYNC};
 use std::collections::VecDeque;
 
-const DC_R: f32 = 0.9995; // high-pass pole; ~4 Hz cutoff at 48 kHz, preserves the square shape
+const DC_R: f32 = 0.9995; // one-pole high-pass; ~4 Hz cutoff at 48 kHz
 const PEAK_DECAY: f32 = 0.9999;
-const HYST_FRAC: f32 = 0.10; // hysteresis band as a fraction of running peak
+const HYST_FRAC: f32 = 0.10;
+const ALPHA: f32 = 1.0 / 16.0; // bit-period EMA rate
+const WARMUP_INTERVALS: usize = 64; // <1 frame; seeds the bit-period estimate
 
 pub struct Decoder {
-    // DC blocker state
     dc_prev_x: f32,
     dc_prev_y: f32,
-    // amplitude tracking (for hysteresis, so noise near zero doesn't retrigger)
     peak: f32,
-    // edge / interval state
     last_sign: bool,
     samples_since_edge: u32,
     seen_first_edge: bool,
-    // biphase classify state
-    half_bit: f32, // running estimate of half a bit period, in samples
-    pending_short: bool,
-    // frame assembly: most recent up-to-80 logical bits, oldest at front
+
+    // bit-period tracking (full bit, in samples). Updated ONLY toward full-bit
+    // equivalents (a lone full interval, or a pair of half intervals summed), so
+    // long runs of identical bits can't inflate it — the drift bug that was here.
+    bit_period: f32,
+    seeded: bool,
+    warmup: Vec<f32>,
+    pending_half: Option<f32>,
+
     reg: VecDeque<bool>,
 }
 
@@ -39,13 +42,14 @@ impl Decoder {
             last_sign: true,
             samples_since_edge: 0,
             seen_first_edge: false,
-            half_bit: f32::MAX / 4.0, // large; snaps down within the first frame
-            pending_short: false,
+            bit_period: 0.0,
+            seeded: false,
+            warmup: Vec::with_capacity(WARMUP_INTERVALS),
+            pending_half: None,
             reg: VecDeque::with_capacity(81),
         }
     }
 
-    /// Feed one PCM sample. Returns a timecode iff a frame completed here.
     pub fn push_sample(&mut self, x: i16) -> Option<Timecode> {
         // DC block: y = x - x_prev + R*y_prev
         let xf = x as f32;
@@ -53,7 +57,6 @@ impl Decoder {
         self.dc_prev_x = xf;
         self.dc_prev_y = y;
 
-        // track peak for hysteresis band
         let mag = y.abs();
         if mag > self.peak {
             self.peak = mag;
@@ -61,7 +64,6 @@ impl Decoder {
         self.peak *= PEAK_DECAY;
         let hyst = self.peak * HYST_FRAC;
 
-        // hysteresis sign: only flip once clearly past the band
         let sign = if y > hyst {
             true
         } else if y < -hyst {
@@ -79,32 +81,39 @@ impl Decoder {
             if self.seen_first_edge {
                 return self.on_interval(interval);
             }
-            self.seen_first_edge = true; // first edge has no measurable interval before it
+            self.seen_first_edge = true;
         }
         None
     }
 
     fn on_interval(&mut self, iv: f32) -> Option<Timecode> {
-        // Adapt: snap down to any shorter interval (half-bits are the shortest,
-        // and every sync word's twelve consecutive 1s guarantees they appear),
-        // creep up slowly so a spurious short interval self-corrects.
-        if iv < self.half_bit {
-            self.half_bit = iv;
-        } else {
-            self.half_bit += self.half_bit / 64.0;
+        // Seed the bit period from a short warmup: the shortest interval seen is
+        // a half-bit (every sync word's twelve 1s guarantee half-bits appear),
+        // so 2x that is one full bit. No bits are emitted during warmup.
+        if !self.seeded {
+            self.warmup.push(iv);
+            if self.warmup.len() >= WARMUP_INTERVALS {
+                let min = self.warmup.iter().cloned().fold(f32::MAX, f32::min);
+                self.bit_period = 2.0 * min;
+                self.seeded = true;
+            }
+            return None;
         }
-        let threshold = self.half_bit * 1.5;
+
+        let threshold = 0.75 * self.bit_period; // midway between half (0.5) and full (1.0)
 
         if iv >= threshold {
             // one full-bit interval => logical 0
-            self.pending_short = false;
+            self.pending_half = None;
+            self.bit_period += (iv - self.bit_period) * ALPHA;
             self.push_bit(false)
-        } else if self.pending_short {
+        } else if let Some(first) = self.pending_half.take() {
             // second of two half-bit intervals => logical 1
-            self.pending_short = false;
+            let full_equiv = first + iv; // ~one full bit
+            self.bit_period += (full_equiv - self.bit_period) * ALPHA;
             self.push_bit(true)
         } else {
-            self.pending_short = true;
+            self.pending_half = Some(iv);
             None
         }
     }
@@ -114,12 +123,14 @@ impl Decoder {
         if self.reg.len() > 80 {
             self.reg.pop_front();
         }
-        if self.reg.len() == 80 {
-            // sync word occupies the last 16 bits (frame bits 64..=79)
-            let synced = (64..80).all(|i| self.reg[i] == SYNC[i - 64]);
-            if synced {
-                let bits: Vec<bool> = self.reg.iter().copied().collect();
-                return Some(decode_frame(&bits));
+        if self.reg.len() == 80 && (64..80).all(|i| self.reg[i] == SYNC[i - 64]) {
+            let bits: Vec<bool> = self.reg.iter().copied().collect();
+            let tc = decode_frame(&bits);
+            // Validity gate: a true sync at a wrong lock can still align by luck;
+            // reject anything whose BCD is out of range. (frames<30 covers
+            // 24/25/30 fps; thread real fps in for an exact bound.)
+            if tc.hours < 24 && tc.minutes < 60 && tc.seconds < 60 && tc.frames < 30 {
+                return Some(tc);
             }
         }
         None

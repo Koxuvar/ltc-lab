@@ -79,7 +79,7 @@ fn cmd_generate(f: &HashMap<String, String>) {
     let rate = get_u32(f, "rate", 48_000);
     let preroll = get_u32(f, "preroll", 0);
 
-    if rate % (80 * fps) != 0 {
+    if !rate.is_multiple_of(80 * fps) {
         fail(&format!(
             "{rate} Hz is not an integer number of samples per bit at {fps} fps. \
              Use 24/25/30 fps; 29.97 needs fractional timing (not yet supported)."

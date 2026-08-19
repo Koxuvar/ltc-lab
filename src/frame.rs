@@ -19,8 +19,8 @@ pub struct Timecode {
 }
 
 impl Timecode {
-    /// Parse "HH:MM:SS:FF". A ';' before the frames field marks drop frame
-    /// following the usual convetion (eg "01:00:00;00")
+    /// Parse "HH:MM:SS:FF". A ';' before the frames field marks drop-frame,
+    /// following the usual convention (e.g. "01:00:00;00").
     pub fn parse(s: &str) -> Result<Timecode, String> {
         let drop_frame = s.contains(';');
         let parts: Vec<&str> = s.split(|c| c == ':' || c == ';').collect();
@@ -69,55 +69,39 @@ fn get_field(bits: &[bool], start: usize, n: usize) -> u8 {
     v
 }
 
-/// Build one 80-bit frame from a timecode.
 pub fn encode_frame(tc: Timecode) -> [bool; 80] {
     let mut b = [false; 80];
-
-    // Time data, BCD, split into units + tens fields at their fixed offsets.
-    set_field(&mut b, 0, 4, tc.frames % 10); // frame units
-    set_field(&mut b, 8, 2, tc.frames / 10); // frame tens
-    b[10] = tc.drop_frame; // drop-frame flag
-    // b[11] color-frame flag: left 0
-    set_field(&mut b, 16, 4, tc.seconds % 10); // secs units
-    set_field(&mut b, 24, 3, tc.seconds / 10); // secs tens
-    set_field(&mut b, 32, 4, tc.minutes % 10); // mins units
-    set_field(&mut b, 40, 3, tc.minutes / 10); // mins tens
-    set_field(&mut b, 48, 4, tc.hours % 10); // hours units
-    set_field(&mut b, 56, 2, tc.hours / 10); // hours tens
-    // user bits (groups of 4) left 0 for now.
-
-    // Sync word, bits 64..=79.
+    set_field(&mut b, 0, 4, tc.frames % 10);
+    set_field(&mut b, 8, 2, tc.frames / 10);
+    b[10] = tc.drop_frame;
+    set_field(&mut b, 16, 4, tc.seconds % 10);
+    set_field(&mut b, 24, 3, tc.seconds / 10);
+    set_field(&mut b, 32, 4, tc.minutes % 10);
+    set_field(&mut b, 40, 3, tc.minutes / 10);
+    set_field(&mut b, 48, 4, tc.hours % 10);
+    set_field(&mut b, 56, 2, tc.hours / 10);
     for i in 0..16 {
         b[64 + i] = SYNC[i];
     }
-
-    // Bit 27 is the biphase-mark polarity-correction bit (24/30 fps systems):
-    // set so the whole 80-bit word contains an even number of logical 0s.
-    // Real gear does this; our own decoder does not depend on it.
-    let zeros = b.iter().filter(|&&x| !x).count();
-    if zeros % 2 != 0 {
+    // Polarity-correction bit (24/30 fps): even number of logical 0s overall.
+    if b.iter().filter(|&&x| !x).count() % 2 != 0 {
         b[27] = true;
     }
-
     b
 }
 
-/// Decode a frame-aligned 80-bit slice back into a timecode.
 pub fn decode_frame(bits: &[bool]) -> Timecode {
-    let frames = get_field(bits, 8, 2) * 10 + get_field(bits, 0, 4);
-    let seconds = get_field(bits, 24, 3) * 10 + get_field(bits, 16, 4);
-    let minutes = get_field(bits, 40, 3) * 10 + get_field(bits, 32, 4);
-    let hours = get_field(bits, 56, 2) * 10 + get_field(bits, 48, 4);
     Timecode {
-        hours,
-        minutes,
-        seconds,
-        frames,
+        hours: get_field(bits, 56, 2) * 10 + get_field(bits, 48, 4),
+        minutes: get_field(bits, 40, 3) * 10 + get_field(bits, 32, 4),
+        seconds: get_field(bits, 24, 3) * 10 + get_field(bits, 16, 4),
+        frames: get_field(bits, 8, 2) * 10 + get_field(bits, 0, 4),
         drop_frame: bits[10],
     }
 }
 
-/// Increment a timecode by one frame (no drop-frame renumbering yet).
+/// Increment by one frame. Drop-frame renumbering (skipping frames 00/01 at
+/// minute boundaries except every tenth minute) is NOT applied yet.
 pub fn next_frame(tc: Timecode, fps: u8) -> Timecode {
     let mut t = tc;
     t.frames += 1;
