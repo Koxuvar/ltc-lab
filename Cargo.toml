@@ -1,0 +1,17 @@
+[package]
+name = "ltc-lab"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ltc-lab"
+path = "src/main.rs"
+
+[dependencies]
+# Live audio capture pulls in platform audio libraries (ALSA on Linux, etc).
+# Optional so the core builds with zero dependencies; enable with --features live.
+cpal = { version = "0.15", optional = true }
+rtrb = { version = "0.3", optional = true }
+
+[features]
+live = ["dep:cpal", "dep:rtrb"]
