@@ -3,15 +3,27 @@ name = "ltc-lab"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "ltc_lab"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ltc-lab"
 path = "src/main.rs"
+
+[[bin]]
+name = "ltc-tui"
+path = "src/bin/tui.rs"
+required-features = ["tui"]
 
 [dependencies]
 # Live audio capture pulls in platform audio libraries (ALSA on Linux, etc).
 # Optional so the core builds with zero dependencies; enable with --features live.
 cpal = { version = "0.15", optional = true }
 rtrb = { version = "0.3", optional = true }
+ratatui = { version = "0.26", optional = true }
+crossterm = { version = "0.27", optional = true }
 
 [features]
 live = ["dep:cpal", "dep:rtrb"]
+tui = ["dep:ratatui", "dep:crossterm"]
