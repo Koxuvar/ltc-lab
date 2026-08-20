@@ -33,6 +33,12 @@ pub struct Decoder {
     reg: VecDeque<bool>,
 }
 
+impl Default for Decoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Decoder {
     pub fn new() -> Self {
         Decoder {
@@ -161,7 +167,7 @@ mod tests {
         let n = (secs * real).round() as u32;
         let frames: Vec<[bool; 80]> = sequence(start, n, nominal)
             .iter()
-            .map(|&t| encode_frame(t))
+            .map(|&t| encode_frame(t, nominal))
             .collect();
         let samples = encode_bits_to_samples(&frames, 48_000, real, 16_000);
         let mut dec = Decoder::new();

@@ -6,4 +6,6 @@ pub mod decoder;
 pub mod frame;
 pub mod generate;
 pub mod rate;
+#[cfg(feature = "tui")]
+pub mod tui;
 pub mod wav;

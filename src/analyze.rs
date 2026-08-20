@@ -92,7 +92,7 @@ mod tests {
         let n = (secs * real).round() as u32;
         let frames: Vec<[bool; 80]> = sequence(start, n, nominal)
             .iter()
-            .map(|&t| encode_frame(t))
+            .map(|&t| encode_frame(t, nominal))
             .collect();
         encode_bits_to_samples(&frames, 48_000, real, 16_000)
     }

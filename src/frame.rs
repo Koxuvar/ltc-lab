@@ -21,9 +21,15 @@ pub struct Timecode {
 impl Timecode {
     /// Parse "HH:MM:SS:FF". A ';' before the frames field marks drop-frame,
     /// following the usual convention (e.g. "01:00:00;00").
+    ///
+    /// Validates against generic BCD-representable ranges (hours<24,
+    /// minutes/seconds<60, frames<30); the exact frame upper bound actually
+    /// depends on the target fps, which isn't known at parse time, so a
+    /// too-large frame number for a given rate (e.g. "..:29" at 24 fps) isn't
+    /// caught here.
     pub fn parse(s: &str) -> Result<Timecode, String> {
         let drop_frame = s.contains(';');
-        let parts: Vec<&str> = s.split(|c| c == ':' || c == ';').collect();
+        let parts: Vec<&str> = s.split([':', ';']).collect();
         if parts.len() != 4 {
             return Err(format!("expected HH:MM:SS:FF, got {s:?}"));
         }
@@ -32,13 +38,19 @@ impl Timecode {
                 .parse::<u8>()
                 .map_err(|_| format!("bad field {:?}", parts[i]))
         };
-        Ok(Timecode {
+        let tc = Timecode {
             hours: n(0)?,
             minutes: n(1)?,
             seconds: n(2)?,
             frames: n(3)?,
             drop_frame,
-        })
+        };
+        if tc.hours >= 24 || tc.minutes >= 60 || tc.seconds >= 60 || tc.frames >= 30 {
+            return Err(format!(
+                "field out of range in {s:?}: hours<24, minutes/seconds<60, frames<30"
+            ));
+        }
+        Ok(tc)
     }
 }
 
@@ -69,7 +81,9 @@ fn get_field(bits: &[bool], start: usize, n: usize) -> u8 {
     v
 }
 
-pub fn encode_frame(tc: Timecode) -> [bool; 80] {
+/// `fps` is the NOMINAL frame rate (24, 25, or 30) used only to place the
+/// polarity-correction bit correctly; see below.
+pub fn encode_frame(tc: Timecode, fps: u8) -> [bool; 80] {
     let mut b = [false; 80];
     set_field(&mut b, 0, 4, tc.frames % 10);
     set_field(&mut b, 8, 2, tc.frames / 10);
@@ -80,12 +94,16 @@ pub fn encode_frame(tc: Timecode) -> [bool; 80] {
     set_field(&mut b, 40, 3, tc.minutes / 10);
     set_field(&mut b, 48, 4, tc.hours % 10);
     set_field(&mut b, 56, 2, tc.hours / 10);
-    for i in 0..16 {
-        b[64 + i] = SYNC[i];
-    }
-    // Polarity-correction bit (24/30 fps): even number of logical 0s overall.
+    b[64..80].copy_from_slice(&SYNC);
+    // Polarity-correction bit: SMPTE 12M puts it at bit 27 for 24/30 fps, but
+    // at bit 59 for 25 fps — bits 27/43/59 rotate between the polarity bit
+    // and two binary-group-flag bits (BGF0/BGF2) depending on rate. We never
+    // emit a user-bits format, so the BGF slots are correctly left at 0; only
+    // the polarity slot needs setting, for an even number of logical 0s
+    // overall.
+    let polarity_bit = if fps == 25 { 59 } else { 27 };
     if b.iter().filter(|&&x| !x).count() % 2 != 0 {
-        b[27] = true;
+        b[polarity_bit] = true;
     }
     b
 }
@@ -118,7 +136,7 @@ pub fn next_frame(tc: Timecode, fps: u8) -> Timecode {
                 t.minutes = 0;
                 t.hours = (t.hours + 1) % 24;
             }
-            if t.drop_frame && t.minutes % 10 != 0 {
+            if t.drop_frame && !t.minutes.is_multiple_of(10) {
                 t.frames = 2; // skip 00 and 01
             }
         }
@@ -154,14 +172,14 @@ mod tests {
     fn bcd_field_placement() {
         // Independent oracle: frames=23 => units 3 (bits 0-3, LSB first),
         // tens 2 (bits 8-9). Catches any bit-offset drift in encode_frame.
-        let b = encode_frame(tc(0, 0, 0, 23, false));
+        let b = encode_frame(tc(0, 0, 0, 23, false), 30);
         assert_eq!(&b[0..4], &[true, true, false, false]); // 3 = 0b0011 LSB-first
         assert_eq!(&b[8..10], &[false, true]); // 2 = 0b10 LSB-first
     }
 
     #[test]
     fn sync_word_present() {
-        assert_eq!(&encode_frame(tc(1, 2, 3, 4, false))[64..80], &SYNC[..]);
+        assert_eq!(&encode_frame(tc(1, 2, 3, 4, false), 30)[64..80], &SYNC[..]);
     }
 
     #[test]
@@ -170,12 +188,36 @@ mod tests {
             for m in [0u8, 7, 59] {
                 for s in [0u8, 30, 59] {
                     for f in [0u8, 15, 29] {
-                        let t = tc(h, m, s, f, false);
-                        assert_eq!(decode_frame(&encode_frame(t)), t, "roundtrip {t}");
+                        for fps in [24u8, 25, 30] {
+                            let t = tc(h, m, s, f, false);
+                            assert_eq!(
+                                decode_frame(&encode_frame(t, fps)),
+                                t,
+                                "roundtrip {t} @ {fps}fps"
+                            );
+                        }
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn polarity_bit_at_27_for_24_and_30_fps() {
+        for fps in [24u8, 30] {
+            let b = encode_frame(tc(1, 2, 3, 4, false), fps);
+            // BGF0/BGF2 slots (43, 59) stay 0 since we emit no user-bits format.
+            assert!(!b[59], "bit 59 (BGF2) should be 0 at {fps}fps");
+            assert_eq!(b.iter().filter(|&&x| !x).count() % 2, 0, "odd zero count at {fps}fps");
+        }
+    }
+
+    #[test]
+    fn polarity_bit_at_59_for_25_fps() {
+        let b = encode_frame(tc(1, 2, 3, 4, false), 25);
+        // BGF0 slot (27) stays 0 since we emit no user-bits format.
+        assert!(!b[27], "bit 27 (BGF0) should be 0 at 25fps");
+        assert_eq!(b.iter().filter(|&&x| !x).count() % 2, 0, "odd zero count at 25fps");
     }
 
     #[test]
@@ -187,6 +229,16 @@ mod tests {
         assert!(Timecode::parse("01:02:03;04").unwrap().drop_frame);
         assert_eq!(format!("{}", tc(1, 2, 3, 4, false)), "01:02:03:04");
         assert_eq!(format!("{}", tc(1, 2, 3, 4, true)), "01:02:03;04");
+    }
+
+    #[test]
+    fn parse_rejects_out_of_range_fields() {
+        assert!(Timecode::parse("24:00:00:00").is_err(), "hours must be <24");
+        assert!(Timecode::parse("00:60:00:00").is_err(), "minutes must be <60");
+        assert!(Timecode::parse("00:00:60:00").is_err(), "seconds must be <60");
+        assert!(Timecode::parse("00:00:00:30").is_err(), "frames must be <30");
+        assert!(Timecode::parse("99:99:99:99").is_err());
+        assert!(Timecode::parse("23:59:59:29").is_ok(), "max valid values");
     }
 
     #[test]

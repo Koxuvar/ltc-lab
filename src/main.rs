@@ -1,5 +1,5 @@
 use ltc_lab::decoder::Decoder;
-use ltc_lab::frame::{encode_frame, sequence, Timecode};
+use ltc_lab::generate::generate_to_wav;
 use std::collections::HashMap;
 
 const HELP: &str = "\
@@ -14,62 +14,6 @@ USAGE:
 --fps accepts: 24, 25, 30, 29.97, 23.976
 --start: use ';' before the frames field for drop-frame, e.g. 01:00:00;00
          (';' with --fps 30 is treated as 29.97 drop-frame, the usual shorthand)";
-
-/// A frame rate carries a nominal count (for numbering) and a real rate (for
-/// sample timing); drop-frame only applies to the 29.97 family.
-struct RateSpec {
-    nominal: u8,
-    real: f64,
-    drop: bool,
-}
-
-fn parse_rate(fps: &str, start_is_df: bool) -> Result<RateSpec, String> {
-    let df_2997 = 30_000.0 / 1001.0; // 29.97003
-    let df_2398 = 24_000.0 / 1001.0; // 23.976
-    let spec = match fps {
-        "24" => RateSpec {
-            nominal: 24,
-            real: 24.0,
-            drop: false,
-        },
-        "25" => RateSpec {
-            nominal: 25,
-            real: 25.0,
-            drop: false,
-        },
-        "30" if start_is_df => RateSpec {
-            nominal: 30,
-            real: df_2997,
-            drop: true,
-        },
-        "30" => RateSpec {
-            nominal: 30,
-            real: 30.0,
-            drop: false,
-        },
-        "29.97" | "29.97df" => RateSpec {
-            nominal: 30,
-            real: df_2997,
-            drop: start_is_df,
-        },
-        "23.976" | "23.98" => RateSpec {
-            nominal: 24,
-            real: df_2398,
-            drop: false,
-        },
-        other => {
-            return Err(format!(
-                "unsupported --fps {other:?} (try 24, 25, 30, 29.97, 23.976)"
-            ))
-        }
-    };
-    if start_is_df && !spec.drop {
-        return Err(format!(
-            "drop-frame (';') is only defined for 29.97, not {fps} fps"
-        ));
-    }
-    Ok(spec)
-}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -121,77 +65,32 @@ fn fail(msg: &str) -> ! {
 }
 
 fn cmd_generate(f: &HashMap<String, String>) {
-    let mut start =
-        Timecode::parse(&get_str(f, "start", "01:00:00:00")).unwrap_or_else(|e| fail(&e));
-    let rate = parse_rate(&get_str(f, "fps", "30"), start.drop_frame).unwrap_or_else(|e| fail(&e));
-    // Normalise: the frame's drop-frame bit follows the resolved rate.
-    start.drop_frame = rate.drop;
-
+    let start = get_str(f, "start", "01:00:00:00");
+    let fps = get_str(f, "fps", "30");
     let length = get_f64(f, "length", 10.0);
     let preroll = get_u32(f, "preroll", 0);
     let sample_rate = get_u32(f, "rate", 48_000);
+    let out = f.get("out").cloned();
 
-    // Frame COUNT follows the real rate (so a DF file's timecode tracks wall
-    // clock); frame NUMBERING follows the nominal rate via next_frame.
-    let payload_frames = (length * rate.real).round() as u32;
-    let payload = sequence(start, payload_frames, rate.nominal);
+    let report = generate_to_wav(&start, length, &fps, sample_rate, preroll, out)
+        .unwrap_or_else(|e| fail(&e));
 
-    let mut frames: Vec<[bool; 80]> = Vec::new();
-    for _ in 0..preroll {
-        frames.push(encode_frame(start));
-    }
-    frames.extend(payload.iter().map(|&tc| encode_frame(tc)));
-
-    let samples = ltc_lab::biphase::encode_bits_to_samples(&frames, sample_rate, rate.real, 16_000);
-    let path = f
-        .get("out")
-        .cloned()
-        .unwrap_or_else(|| default_name(start, length, &rate, sample_rate));
-    ltc_lab::wav::write_wav_mono16(&path, &samples, sample_rate).expect("write wav");
-
-    let end = payload.last().copied().unwrap_or(start);
     println!(
-        "wrote {path}\n  {start} -> {end}  ({length}s, {} fps{}, {sample_rate} Hz)\n  \
-         {payload_frames} payload frames (+{preroll} preroll), {} samples",
-        fmt_rate(&rate),
-        if rate.drop { " drop" } else { "" },
-        samples.len()
+        "wrote {path}\n  {} -> {}  ({length}s, {} fps{}, {sample_rate} Hz)\n  \
+         {} payload frames (+{preroll} preroll), {} samples",
+        report.start,
+        report.end,
+        report.rate.label(),
+        if report.rate.drop { " drop" } else { "" },
+        report.payload_frames,
+        report.samples,
+        path = report.path,
     );
 }
 
-fn fmt_rate(r: &RateSpec) -> String {
-    if (r.real - r.real.round()).abs() < 1e-6 {
-        format!("{}", r.nominal)
-    } else {
-        format!("{:.2}", r.real)
-    }
-}
-
-fn default_name(tc: Timecode, length: f64, rate: &RateSpec, sr: u32) -> String {
-    let df = if rate.drop { "DF" } else { "" };
-    format!(
-        "ltc_{:02}h{:02}m{:02}s{:02}f_{}s_{}fps{}_{}Hz.wav",
-        tc.hours,
-        tc.minutes,
-        tc.seconds,
-        tc.frames,
-        trim_len(length),
-        fmt_rate(rate).replace('.', "p"),
-        df,
-        sr
-    )
-}
-
-fn trim_len(x: f64) -> String {
-    if x.fract() == 0.0 {
-        format!("{}", x as i64)
-    } else {
-        format!("{x}").replace('.', "p")
-    }
-}
-
 fn cmd_decode_file(path: &str) {
-    let (pcm, sr) = ltc_lab::wav::read_wav_mono16(path).expect("read wav");
+    let (pcm, sr) = ltc_lab::wav::read_wav_mono16(path)
+        .unwrap_or_else(|e| fail(&format!("reading {path:?}: {e}")));
     let mut dec = Decoder::new();
     let mut frames = Vec::new();
     for &s in &pcm {
@@ -212,6 +111,7 @@ fn cmd_decode_file(path: &str) {
 #[cfg(feature = "live")]
 fn cmd_listen(_fps: u32) {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    use ltc_lab::frame::Timecode;
 
     let host = cpal::default_host();
     let device = host
