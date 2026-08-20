@@ -136,3 +136,138 @@ impl Decoder {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Decoder;
+    use crate::biphase::encode_bits_to_samples;
+    use crate::frame::{encode_frame, next_frame, sequence, Timecode};
+
+    const DF_2997: f64 = 30_000.0 / 1001.0;
+    const DF_2398: f64 = 24_000.0 / 1001.0;
+
+    fn tc(h: u8, m: u8, s: u8, f: u8, d: bool) -> Timecode {
+        Timecode {
+            hours: h,
+            minutes: m,
+            seconds: s,
+            frames: f,
+            drop_frame: d,
+        }
+    }
+
+    /// Generate `secs` of LTC and decode it sample-by-sample (the live path).
+    fn decode_generated(start: Timecode, secs: f64, nominal: u8, real: f64) -> Vec<Timecode> {
+        let n = (secs * real).round() as u32;
+        let frames: Vec<[bool; 80]> = sequence(start, n, nominal)
+            .iter()
+            .map(|&t| encode_frame(t))
+            .collect();
+        let samples = encode_bits_to_samples(&frames, 48_000, real, 16_000);
+        let mut dec = Decoder::new();
+        let mut out = Vec::new();
+        for s in samples {
+            if let Some(t) = dec.push_sample(s) {
+                out.push(t);
+            }
+        }
+        out
+    }
+
+    /// Every frame valid BCD; every adjacent pair exactly one increment apart
+    /// (drop-frame aware); most of the payload recovered.
+    fn assert_clean(out: &[Timecode], nominal: u8, min_len: usize) {
+        assert!(out.len() >= min_len, "recovered only {} frames", out.len());
+        for t in out {
+            assert!(
+                t.hours < 24 && t.minutes < 60 && t.seconds < 60 && t.frames < 30,
+                "invalid BCD: {t}"
+            );
+        }
+        for w in out.windows(2) {
+            assert_eq!(
+                w[1],
+                next_frame(w[0], nominal),
+                "continuity break {} -> {}",
+                w[0],
+                w[1]
+            );
+        }
+    }
+
+    #[test]
+    fn roundtrip_30() {
+        assert_clean(
+            &decode_generated(tc(1, 0, 0, 0, false), 5.0, 30, 30.0),
+            30,
+            145,
+        );
+    }
+
+    #[test]
+    fn roundtrip_25() {
+        assert_clean(
+            &decode_generated(tc(1, 0, 0, 0, false), 5.0, 25, 25.0),
+            25,
+            120,
+        );
+    }
+
+    #[test]
+    fn roundtrip_24() {
+        assert_clean(
+            &decode_generated(tc(1, 0, 0, 0, false), 5.0, 24, 24.0),
+            24,
+            110,
+        );
+    }
+
+    #[test]
+    fn roundtrip_2997_drop_noninteger_timing() {
+        assert_clean(
+            &decode_generated(tc(0, 0, 0, 0, true), 5.0, 30, DF_2997),
+            30,
+            145,
+        );
+    }
+
+    #[test]
+    fn roundtrip_23976_noninteger_timing() {
+        assert_clean(
+            &decode_generated(tc(1, 0, 0, 0, false), 5.0, 24, DF_2398),
+            24,
+            110,
+        );
+    }
+
+    #[test]
+    fn no_drift_on_zero_heavy_start() {
+        // Regression for the threshold-drift bug: 01:00:00:00 has ~25 leading
+        // zero bits; 30s exercises many zero-heavy values. Must stay clean.
+        assert_clean(
+            &decode_generated(tc(1, 0, 0, 0, false), 30.0, 30, 30.0),
+            30,
+            880,
+        );
+    }
+
+    #[test]
+    fn drop_frame_skips_at_normal_minute() {
+        let out = decode_generated(tc(1, 0, 58, 0, true), 4.0, 30, DF_2997);
+        assert!(
+            out.windows(2)
+                .any(|w| w[0] == tc(1, 0, 59, 29, true) && w[1] == tc(1, 1, 0, 2, true)),
+            "did not observe ;29 -> ;02 across a normal minute"
+        );
+    }
+
+    #[test]
+    fn drop_frame_no_skip_at_tenth_minute() {
+        let out = decode_generated(tc(1, 9, 58, 0, true), 4.0, 30, DF_2997);
+        assert!(
+            out.windows(2)
+                .any(|w| w[0] == tc(1, 9, 59, 29, true) && w[1] == tc(1, 10, 0, 0, true)),
+            "did not observe ;29 -> ;00 at the tenth minute"
+        );
+    }
+}
