@@ -32,9 +32,9 @@ pub fn generate_to_wav(
 
     let mut frames: Vec<[bool; 80]> = Vec::new();
     for _ in 0..preroll {
-        frames.push(encode_frame(start));
+        frames.push(encode_frame(start, rate.nominal));
     }
-    frames.extend(payload.iter().map(|&tc| encode_frame(tc)));
+    frames.extend(payload.iter().map(|&tc| encode_frame(tc, rate.nominal)));
 
     let samples = encode_bits_to_samples(&frames, sample_rate, rate.real, 16_000);
     let path = out.unwrap_or_else(|| default_name(start, length, &rate, sample_rate));

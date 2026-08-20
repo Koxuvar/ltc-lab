@@ -280,7 +280,7 @@ mod tests {
         };
         let frames: Vec<[bool; 80]> = sequence(start, 60, 30)
             .iter()
-            .map(|&t| encode_frame(t))
+            .map(|&t| encode_frame(t, 30))
             .collect();
         let samples = encode_bits_to_samples(&frames, 48_000, 30.0, 16_000);
 

@@ -50,13 +50,16 @@ mod tests {
     use crate::frame::{encode_frame, Timecode};
 
     fn frame() -> [bool; 80] {
-        encode_frame(Timecode {
-            hours: 1,
-            minutes: 0,
-            seconds: 0,
-            frames: 0,
-            drop_frame: false,
-        })
+        encode_frame(
+            Timecode {
+                hours: 1,
+                minutes: 0,
+                seconds: 0,
+                frames: 0,
+                drop_frame: false,
+            },
+            30,
+        )
     }
 
     #[test]
