@@ -2,6 +2,7 @@
 name = "ltc-lab"
 version = "0.1.0"
 edition = "2021"
+default-run = "ltc-tui"
 
 [lib]
 name = "ltc_lab"
@@ -25,5 +26,6 @@ ratatui = { version = "0.26", optional = true }
 crossterm = { version = "0.27", optional = true }
 
 [features]
+default = ["tui"]
 live = ["dep:cpal", "dep:rtrb"]
 tui = ["dep:ratatui", "dep:crossterm"]
