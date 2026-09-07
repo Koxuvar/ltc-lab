@@ -32,11 +32,12 @@ Drop-frame only applies at 29.97 fps (nominal 30): frame numbers `00` and `01` a
 
 - **Generate LTC WAVs** — from any start timecode, length, frame rate, and sample rate. Optional preroll and auto-named output files (`ltc_01h00m00s00f_10s_30fps_48000Hz.wav`).
 - **Decode WAV files** — streaming sample-by-sample decoder that recovers timecode from mono or stereo 16-bit PCM; stereo keeps the first (left) channel.
-- **Terminal UI** (default build) — two-tab `ratatui` interface:
+- **Terminal UI** (default build) — three-tab `ratatui` interface:
   - **Generate** tab: edit start timecode, duration, fps (preset cycle), and sample rate; press Enter to write a WAV.
-  - **Decode** tab: enter a `.wav` path, inspect whole-file analysis (start/end, frame count, inferred rate, duration, sample rate, continuity), and watch timecode roll in real time with play/pause, reset, and progress gauge.
+  - **Decode** tab: enter a `.wav` path, inspect whole-file analysis (start/end, frame count, inferred rate, duration, sample rate, continuity), and watch timecode roll with play/pause, reset, and progress gauge. Built with `--features live`, it plays the file through an output device you pick (decoding what you hear); otherwise it rolls a wall-clock simulation.
+  - **Live** tab (`--features live`): pick an input device and decode LTC arriving on it in real time, with a peak level meter. Without `live`, the tab shows a short "rebuild" note.
 - **Whole-file analysis** — single-pass decode that infers nominal fps from second rollovers, detects drop-frame, checks continuity, and reports duration.
-- **Live audio capture** (opt-in `--features live`) — listen on the default input device via `cpal` + `rtrb` ring buffer and print timecode as it arrives.
+- **Live audio capture** (opt-in `--features live`) — decode from an input device via `cpal` + `rtrb` ring buffer, in the TUI's Live tab or the CLI `listen` command.
 - **Robust WAV I/O** — dependency-free `wav.rs` that walks RIFF chunks (handles extra `JUNK`/`bext`/`fact` chunks, odd-size padding, truncated `data` chunks), supports `WAVE_FORMAT_EXTENSIBLE`, and returns typed `WavError` instead of panicking.
 - **Non-integer rate support** — fractional sample clocks (e.g. 29.97 fps at 48 kHz ≈ 20.02 samples/bit) render without drift; 23.976 / 29.97 handled via fractional `real` rates alongside integer `nominal` counts.
 - **Well-tested core** — unit tests for frame BCD placement, polarity correction, biphase round-trips at every supported rate, decoder continuity, drop-frame realignment, and TUI rendering.
@@ -99,19 +100,25 @@ cargo run --bin ltc-tui  # explicit
 
 1. Type a path to a `.wav` file (e.g. `ltc_01h00m00s00f_10s_30fps_48000Hz.wav`).
 2. Press `Enter` to load. The **details** panel populates (start/end, frame count, inferred rate, duration, continuity).
-3. The **timecode** panel rolls as the file "plays" through the streaming decoder at wall-clock speed.
+3. Playback: built with `--features live`, an output-device picker appears — `Up`/`Down` to choose, `Enter` to play the file through it (you hear it; the readout decodes what plays). Without `live`, the timecode panel rolls a wall-clock simulation immediately.
 4. `Space` toggles play/pause, `r` resets to the start, `Backspace` clears the loaded file and returns to path entry.
+
+**Live tab** (`--features live`) — real-time readout from an audio input:
+
+1. `Up`/`Down` to select an input device, `Enter` or `Space` to start capture (`r` re-scans devices).
+2. The **live timecode** rolls as LTC arrives; the **input level** meter confirms signal is present.
+3. `Space` (or `Esc`) stops and returns to the device list.
 
 **Global keys** (shown in the footer):
 
 | Key | Action |
 |-----|--------|
-| `Tab` | Switch between Generate and Decode tabs |
-| `Up` / `Down` | Move focus (Generate tab) |
+| `Tab` | Cycle Generate → Decode → Live tabs |
+| `Up` / `Down` | Move field focus (Generate) or select a device (Decode picker / Live) |
 | `Left` / `Right` | Cycle fps preset (when fps field is focused) |
-| `Enter` | Submit — generate WAV or load file |
-| `Space` | Play / pause (Decode tab, file loaded) |
-| `r` | Reset playback to start (Decode tab) |
+| `Enter` | Submit — generate WAV, load file, or start on the selected device |
+| `Space` | Play / pause (Decode) · start / stop capture (Live) |
+| `r` | Reset playback (Decode) · re-scan input devices (Live) |
 | `Backspace` | Delete character (text field) or unload file (Decode playback) |
 | `Ctrl-C` / `Ctrl-Q` | Quit |
 
@@ -196,7 +203,8 @@ Tests live alongside each module:
 
 ## Roadmap and limitations
 
-- **Live readout** — the Decode tab's wall-clock playback is the stand-in for a live audio readout; wiring `cpal` input directly into the TUI (device picker, level meter) is the next step.
+- **Live readout** — done: the Live tab (`--features live`) decodes from a chosen input device with a level meter, and the Decode tab plays a loaded WAV through a chosen output device while decoding it. The default build keeps the wall-clock simulation as a no-audio fallback.
+- **Playback sample rate** — the Decode tab requests the file's sample rate on the output device; if the device doesn't support it, it falls back to the device's default rate, which shifts pitch/speed (the decoder still locks — it's rate-adaptive). Resampling is not implemented.
 - **User bits** — no user-bits format is emitted; BGF/polarity bits beyond the correction bit are left at zero.
 - **WAV formats** — only 16-bit PCM mono/stereo are supported. Other depths/formats return `WavError::UnsupportedFormat`; swap in `hound` if broader support is needed.
 - **No LTC user-bit modes** or jam-sync — the generator emits a straight timecode track.

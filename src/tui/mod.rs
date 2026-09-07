@@ -1,24 +1,31 @@
-//! Terminal UI over the ltc_lab core. Two tabs: Generate (edit a timecode +
-//! params, write a WAV) and Decode (load a WAV and watch timecode roll as it
-//! "plays" through the streaming decoder — the stand-in for a live readout
-//! until audio input is wired up).
+//! Terminal UI over the ltc_lab core. Three tabs: Generate (edit a timecode +
+//! params, write a WAV), Decode (load a WAV, inspect it, and play it back while
+//! timecode rolls), and Live (decode LTC from an audio input in real time).
 //!
-//! Each screen (`generate`, `decode`) owns its state, key handling, and
+//! The Decode and Live tabs use the streaming decoder differently depending on
+//! the build: with `feature = "live"` they drive real cpal streams (output for
+//! Decode, input for Live); without it, Decode falls back to a wall-clock
+//! simulation and Live shows a "rebuild with --features live" note.
+//!
+//! Each screen (`generate`, `decode`, `live`) owns its state, key handling, and
 //! rendering; this module is the shell that wires them together: top-level
 //! navigation (tab switching, quit), the tab bar / footer chrome, and the
-//! terminal setup + event loop. Adding a new screen (e.g. a future Settings
-//! tab for audio device / color scheme selection) means adding one module,
+//! terminal setup + event loop. Adding a new screen means adding one module,
 //! one `TabId` variant, and one dispatch arm here — the existing screens are
 //! untouched.
 
+#[cfg(feature = "live")]
+mod audio;
 mod decode;
 mod generate;
+mod live;
 
 use std::io;
 use std::time::{Duration, Instant};
 
 use decode::DecodeScreen;
 use generate::GenForm;
+use live::LiveScreen;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -36,12 +43,14 @@ use ratatui::{Frame, Terminal};
 enum TabId {
     Generate,
     Decode,
+    Live,
 }
 
 struct App {
     tab: TabId,
     gen: GenForm,
     dec: DecodeScreen,
+    live: LiveScreen,
 }
 
 impl App {
@@ -50,6 +59,7 @@ impl App {
             tab: TabId::Generate,
             gen: GenForm::new(),
             dec: DecodeScreen::new(),
+            live: LiveScreen::new(),
         }
     }
 
@@ -63,19 +73,22 @@ impl App {
         if key.code == KeyCode::Tab {
             self.tab = match self.tab {
                 TabId::Generate => TabId::Decode,
-                TabId::Decode => TabId::Generate,
+                TabId::Decode => TabId::Live,
+                TabId::Live => TabId::Generate,
             };
             return false;
         }
         match self.tab {
             TabId::Generate => self.gen.handle_key(key.code),
             TabId::Decode => self.dec.handle_key(key.code),
+            TabId::Live => self.live.handle_key(key.code),
         }
         false
     }
 
     fn tick(&mut self, dt_secs: f64) {
         self.dec.tick(dt_secs);
+        self.live.tick(dt_secs);
     }
 }
 
@@ -94,8 +107,9 @@ fn ui(f: &mut Frame, app: &App) {
     let tab_idx = match app.tab {
         TabId::Generate => 0,
         TabId::Decode => 1,
+        TabId::Live => 2,
     };
-    let tabs = Tabs::new(vec!["Generate", "Decode"])
+    let tabs = Tabs::new(vec!["Generate", "Decode", "Live"])
         .select(tab_idx)
         .block(Block::default().borders(Borders::ALL).title(" ltc-lab "))
         .highlight_style(
@@ -109,10 +123,11 @@ fn ui(f: &mut Frame, app: &App) {
     match app.tab {
         TabId::Generate => app.gen.render(f, chunks[1]),
         TabId::Decode => app.dec.render(f, chunks[1]),
+        TabId::Live => app.live.render(f, chunks[1]),
     }
 
     let footer = Paragraph::new(Line::from(Span::styled(
-        " Tab: switch   Up/Down: field   Left/Right: fps   Enter: action   Space: play/pause   r: reset   Ctrl-Q: quit ",
+        " Tab: switch   Up/Down: field/device   Left/Right: fps   Enter: action   Space: play/pause/start   r: reset   Ctrl-Q: quit ",
         Style::default().fg(Color::DarkGray),
     )));
     f.render_widget(footer, chunks[2]);
@@ -169,7 +184,9 @@ pub fn run() -> io::Result<()> {
 
 // ------------------------------- tests ------------------------------------
 
-#[cfg(test)]
+// The smoke test drives the Decode tab's simulation backend via
+// `load_samples_for_test`, which only exists in the default (non-`live`) build.
+#[cfg(all(test, not(feature = "live")))]
 mod tests {
     use super::*;
     use crate::biphase::encode_bits_to_samples;
