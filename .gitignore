@@ -2,3 +2,5 @@
 *.wav
 *Zone*
 *.asd
+
+rust-analyzer.toml
