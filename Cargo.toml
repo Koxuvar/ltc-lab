@@ -24,8 +24,11 @@ cpal = { version = "0.15", optional = true }
 rtrb = { version = "0.3", optional = true }
 ratatui = { version = "0.26", optional = true }
 crossterm = { version = "0.27", optional = true }
+# Large block-glyph rendering for the live timecode readout. Pinned to 0.4.4:
+# that is the last release built against ratatui 0.26 (0.4.5+ moved to 0.27).
+tui-big-text = { version = "=0.4.4", optional = true }
 
 [features]
 default = ["tui"]
-live = ["dep:cpal", "dep:rtrb"]
+live = ["dep:cpal", "dep:rtrb", "dep:tui-big-text"]
 tui = ["dep:ratatui", "dep:crossterm"]

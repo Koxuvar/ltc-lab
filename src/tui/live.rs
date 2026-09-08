@@ -33,6 +33,7 @@ mod enabled {
     use ratatui::style::{Color, Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph};
+    use tui_big_text::{BigText, PixelSize};
 
     pub(crate) struct LiveScreen {
         devices: Vec<(String, Device)>,
@@ -179,12 +180,14 @@ mod enabled {
             };
             let frames = self.engine.as_ref().map(|e| e.frames()).unwrap_or(0);
 
-            let big = Paragraph::new(vec![
-                Line::from(""),
-                Line::from(Span::styled(
-                    tc,
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                )),
+            // Bordered frame; everything else is drawn into its inner area so the
+            // big readout sits above the small status lines.
+            let block = Block::default().borders(Borders::ALL).title(" live timecode ");
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+
+            // The three small lines stay normal size, anchored to the bottom.
+            let info = Paragraph::new(vec![
                 Line::from(Span::styled(state, Style::default().fg(state_color))),
                 Line::from(Span::styled(
                     format!("frames decoded: {frames}"),
@@ -195,9 +198,63 @@ mod enabled {
                     Style::default().fg(Color::Yellow),
                 )),
             ])
-            .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL).title(" live timecode "));
-            f.render_widget(big, area);
+            .alignment(Alignment::Center);
+
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(3)])
+                .split(inner);
+            f.render_widget(info, rows[1]);
+
+            self.render_big_timecode(f, rows[0], &tc);
+        }
+
+        /// Draw the timecode as large block glyphs, centered in `area`, picking the
+        /// largest fixed pixel size that fits the available width without clipping.
+        fn render_big_timecode(&self, f: &mut Frame, area: Rect, tc: &str) {
+            // font8x8 glyphs are 8x8 "pixels"; a PixelSize maps pixels to terminal
+            // cells. (cols, rows) below are the resulting cell footprint per glyph.
+            let glyphs = tc.chars().count() as u16;
+            let (pixel_size, glyph_cols, glyph_rows) = if glyphs * 8 <= area.width {
+                (PixelSize::Full, 8u16, 8u16) // full-cell pixels: tallest and widest
+            } else if glyphs * 4 <= area.width {
+                (PixelSize::HalfWidth, 4u16, 8u16) // half as wide, still 8 rows tall
+            } else {
+                (PixelSize::Quadrant, 4u16, 4u16) // half in both dimensions
+            };
+
+            let color = if self.current.is_some() {
+                Color::Green
+            } else {
+                Color::DarkGray
+            };
+
+            let big = BigText::builder()
+                .pixel_size(pixel_size)
+                .style(Style::default().fg(color).add_modifier(Modifier::BOLD))
+                .lines(vec![Line::from(tc.to_string())])
+                .build();
+
+            match big {
+                Ok(widget) => {
+                    // BigText renders from the top-left; center it manually.
+                    let w = (glyphs * glyph_cols).min(area.width);
+                    let h = glyph_rows.min(area.height);
+                    let x = area.x + (area.width.saturating_sub(w)) / 2;
+                    let y = area.y + (area.height.saturating_sub(h)) / 2;
+                    let target = Rect::new(x, y, w, h);
+                    f.render_widget(widget, target);
+                }
+                // Defensive fallback: keep the tab usable if a glyph is unsupported.
+                Err(_) => {
+                    let para = Paragraph::new(Line::from(Span::styled(
+                        tc.to_string(),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    )))
+                    .alignment(Alignment::Center);
+                    f.render_widget(para, area);
+                }
+            }
         }
 
         fn render_meter(&self, f: &mut Frame, area: Rect) {
